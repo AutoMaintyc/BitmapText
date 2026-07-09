@@ -1,1 +1,1 @@
-# BitMapText
+# BitmapText
