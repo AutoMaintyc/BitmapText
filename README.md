@@ -86,7 +86,3 @@ ComputeLayout（逐字符计算 x 位置、effectiveScale、totalWidth）
     ↓
 ModifyMesh（直接写顶点、UV、三角形到 VertexHelper）
 ```
-
-## License
-
-MIT
