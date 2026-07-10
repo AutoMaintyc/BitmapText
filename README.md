@@ -8,7 +8,7 @@
 |------|------|
 | **独立缩放** | `_scale` 控制缩放倍数，不影响 Transform |
 | **字间距** | `_letterSpacing` 在字符间插入像素级间距 |
-| **等宽模式** | `_monospace` 强制每个字符等宽，适合数字/代码显示 |
+| **等宽模式** | `_monospace` 对指定字符集强制等宽，适合数字/代码显示 |
 | **BestFit** | `_bestFit` 自动缩放以适配 RectTransform 宽高（受 min/max 限制） |
 | **对齐支持** | 完整支持 9 种 `TextAnchor` 对齐方式 |
 | **Editor 实时预览** | `[ExecuteInEditMode]` 无需运行即可看到效果 |
@@ -17,7 +17,7 @@
 
 1. **BestFit** → 覆盖手动 Scale，自动二分查找最佳缩放
 2. **Scale** → BestFit 关闭时的手动缩放值
-3. **Monospace** → 开启后忽略每字符自身 advance，统一宽度
+3. **Monospace** → 开启后对 `_monospaceChars` 指定字符统一宽度
 4. **LetterSpacing** → 总是叠加在 advance 之后
 
 ```
@@ -46,6 +46,8 @@ bmp.letterSpacing = 1.5f;
 bmp.bestFit = true;
 bmp.minScale = 0.5f;
 bmp.maxScale = 2f;
+bmp.monospace = true;
+bmp.monospaceChars = "0123456789";
 ```
 
 ## 支持的字符集
@@ -65,6 +67,7 @@ bmp.maxScale = 2f;
 | `letterSpacing` | `float` | 0 | 字符额外间距 |
 | `monospace` | `bool` | false | 等宽模式 |
 | `monospaceWidth` | `float` | 0 | 等宽宽度（0=自动取最宽） |
+| `monospaceChars` | `string` | `"0123456789"` | 等宽模式作用的字符集 |
 | `bestFit` | `bool` | false | 自动适配宽度 |
 | `minScale` | `float` | 0.1 | BestFit 最小缩放 |
 | `maxScale` | `float` | 3 | BestFit 最大缩放 |
@@ -86,3 +89,7 @@ ComputeLayout（逐字符计算 x 位置、effectiveScale、totalWidth）
     ↓
 ModifyMesh（直接写顶点、UV、三角形到 VertexHelper）
 ```
+
+## License
+
+MIT
