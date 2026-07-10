@@ -10,8 +10,8 @@ using System.Collections.Generic;
 ///   1. BestFit 开启 → Scale 参数被忽略，自动计算缩放以适配 RectTransform 宽度，
 ///      _minScale / _maxScale 限制缩放范围。
 ///   2. BestFit 关闭 → 使用手动设置的 Scale 作为缩放值。
-///   3. Monospace 开启 → 忽略每个字符自身的 advance，统一使用 _monospaceWidth
-///      （为0时自动取缓存字符集中最宽的 advance）。
+///   3. Monospace 开启 → 指定字符集（_monospaceChars）统一使用 _monospaceWidth
+///      （为0时自动取字符集中最宽的 advance）。
 ///   4. LetterSpacing 附加在每个字符 advance 之后，总是叠加生效。
 ///   5. 最终字符占用宽度 = advance × effectiveScale + letterSpacing。
 /// 
@@ -32,11 +32,14 @@ public class BitmapText : BaseMeshEffect
     [Header("字间距")] [Tooltip("字符之间的额外间距（像素单位）")] [SerializeField]
     private float _letterSpacing = 0f;
 
-    [Header("等宽")] [Tooltip("强制每个字符等宽（数字0-9宽度统一），开启后忽略每个字符自身的advance")] [SerializeField]
+    [Header("等宽")] [Tooltip("强制指定字符集等宽，开启后忽略指定字符自身的advance")] [SerializeField]
     private bool _monospace = false;
 
-    [Tooltip("等宽模式下每个字符的宽度，0=自动取最宽字符")] [SerializeField]
+    [Tooltip("等宽模式下每个字符的宽度，0=自动取指定字符集中最宽字符")] [SerializeField]
     private float _monospaceWidth = 0f;
+
+    [Tooltip("等宽模式作用的字符集，默认为数字0-9")] [SerializeField]
+    private string _monospaceChars = "0123456789";
 
     [Header("BestFit（覆盖手动Scale，受Min/Max限制）")] [Tooltip("自动缩放文字以适配RectTransform宽度。优先级最高，开启后Scale参数被忽略")] [SerializeField]
     private bool _bestFit = false;
@@ -54,12 +57,14 @@ public class BitmapText : BaseMeshEffect
     private float _totalWidth;
     private float _effectiveScale;
     private float _monoAdvance;
+    private HashSet<char> _monoCharSet = new HashSet<char>();
 
     private string _lastText = "";
     private float _lastScale = float.NaN;
     private float _lastLetterSpacing = float.NaN;
     private bool _lastMonospace;
     private float _lastMonospaceWidth = float.NaN;
+    private string _lastMonospaceChars = "";
     private bool _lastBestFit;
     private Font _lastFont;
     private float _lastRTWidth = float.NaN;
@@ -136,6 +141,19 @@ public class BitmapText : BaseMeshEffect
             if (!Mathf.Approximately(_monospaceWidth, value))
             {
                 _monospaceWidth = value;
+                InvalidateLayout();
+            }
+        }
+    }
+
+    public string monospaceChars
+    {
+        get { return _monospaceChars; }
+        set
+        {
+            if (_monospaceChars != value)
+            {
+                _monospaceChars = value;
                 InvalidateLayout();
             }
         }
@@ -276,6 +294,7 @@ public class BitmapText : BaseMeshEffect
             !Mathf.Approximately(_lastLetterSpacing, _letterSpacing) ||
             _lastMonospace != _monospace ||
             !Mathf.Approximately(_lastMonospaceWidth, _monospaceWidth) ||
+            _lastMonospaceChars != _monospaceChars ||
             _lastBestFit != _bestFit ||
             _lastFont != _font ||
             !Mathf.Approximately(_lastRTWidth, rtWidth) ||
@@ -289,6 +308,16 @@ public class BitmapText : BaseMeshEffect
             RebuildCharCache();
         }
 
+        if (_lastMonospaceChars != _monospaceChars)
+        {
+            _monoCharSet.Clear();
+            if (!string.IsNullOrEmpty(_monospaceChars))
+            {
+                foreach (char c in _monospaceChars)
+                    _monoCharSet.Add(c);
+            }
+        }
+
         ComputeLayout(rtWidth, rtHeight, alignment);
 
         _lastText = _text != null ? _text.text : "";
@@ -296,6 +325,7 @@ public class BitmapText : BaseMeshEffect
         _lastLetterSpacing = _letterSpacing;
         _lastMonospace = _monospace;
         _lastMonospaceWidth = _monospaceWidth;
+        _lastMonospaceChars = _monospaceChars;
         _lastBestFit = _bestFit;
         _lastFont = _font;
         _lastRTWidth = rtWidth;
@@ -320,10 +350,10 @@ public class BitmapText : BaseMeshEffect
             }
             else
             {
-                foreach (var kv in _charCache)
+                foreach (char mc in _monospaceChars)
                 {
-                    if (kv.Value.advance > _monoAdvance)
-                        _monoAdvance = kv.Value.advance;
+                    if (_charCache.TryGetValue(mc, out CharData mcd) && mcd.advance > _monoAdvance)
+                        _monoAdvance = mcd.advance;
                 }
             }
         }
@@ -334,7 +364,7 @@ public class BitmapText : BaseMeshEffect
             char ch = text[i];
             if (!_charCache.TryGetValue(ch, out CharData cd)) continue;
 
-            float advance = _monospace && _monoAdvance > 0f ? _monoAdvance : cd.advance;
+            float advance = _monospace && _monoCharSet.Contains(ch) && _monoAdvance > 0f ? _monoAdvance : cd.advance;
             _charXPositions.Add(xPos);
             xPos += advance * _effectiveScale + _letterSpacing;
         }
@@ -385,7 +415,9 @@ public class BitmapText : BaseMeshEffect
                 char ch = text[i];
                 if (!_charCache.TryGetValue(ch, out CharData cd)) continue;
 
-                float advance = _monospace && _monoAdvance > 0f ? _monoAdvance : cd.advance;
+                float advance = _monospace && _monoCharSet.Contains(ch) && _monoAdvance > 0f
+                    ? _monoAdvance
+                    : cd.advance;
                 _charXPositions.Add(xPos);
                 xPos += advance * _effectiveScale + _letterSpacing;
             }
@@ -403,7 +435,7 @@ public class BitmapText : BaseMeshEffect
             char ch = text[i];
             if (!_charCache.TryGetValue(ch, out CharData cd)) continue;
 
-            float advance = _monospace && _monoAdvance > 0f ? _monoAdvance : cd.advance;
+            float advance = _monospace && _monoCharSet.Contains(ch) && _monoAdvance > 0f ? _monoAdvance : cd.advance;
             if (charCount > 0) w += _letterSpacing;
             w += advance * s;
             charCount++;
