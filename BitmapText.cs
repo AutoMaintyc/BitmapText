@@ -2,6 +2,7 @@ using UnityEngine;
 using UnityEngine.UI;
 using System.Collections.Generic;
 
+
 /// <summary>
 /// 位图字体增强组件，通过重写 Mesh 实现缩放、字间距、等宽、BestFit 等功能。
 /// 挂载到带 Text 组件的节点上即可生效，不依赖 Transform 缩放。
@@ -41,6 +42,12 @@ public class BitmapText : BaseMeshEffect
     [Tooltip("等宽模式作用的字符集，默认为数字0-9")] [SerializeField]
     private string _monospaceChars = "0123456789";
 
+    [Header("换行")] [Tooltip("开启自动换行，超出RectTransform宽度时换行")] [SerializeField]
+    private bool _wordWrap = false;
+
+    [Tooltip("行间距（像素单位）")] [SerializeField]
+    private float _lineSpacing = 0f;
+
     [Header("BestFit（覆盖手动Scale，受Min/Max限制）")] [Tooltip("自动缩放文字以适配RectTransform宽度。优先级最高，开启后Scale参数被忽略")] [SerializeField]
     private bool _bestFit = false;
 
@@ -54,6 +61,8 @@ public class BitmapText : BaseMeshEffect
 
     private Dictionary<char, CharData> _charCache = new Dictionary<char, CharData>();
     private List<float> _charXPositions = new List<float>();
+    private List<float> _charYPositions = new List<float>();
+    private int _lineCount;
     private float _totalWidth;
     private float _effectiveScale;
     private float _monoAdvance;
@@ -66,6 +75,8 @@ public class BitmapText : BaseMeshEffect
     private float _lastMonospaceWidth = float.NaN;
     private string _lastMonospaceChars = "";
     private bool _lastBestFit;
+    private bool _lastWordWrap;
+    private float _lastLineSpacing = float.NaN;
     private Font _lastFont;
     private float _lastRTWidth = float.NaN;
     private float _lastRTHeight = float.NaN;
@@ -154,6 +165,32 @@ public class BitmapText : BaseMeshEffect
             if (_monospaceChars != value)
             {
                 _monospaceChars = value;
+                InvalidateLayout();
+            }
+        }
+    }
+
+    public bool wordWrap
+    {
+        get { return _wordWrap; }
+        set
+        {
+            if (_wordWrap != value)
+            {
+                _wordWrap = value;
+                InvalidateLayout();
+            }
+        }
+    }
+
+    public float lineSpacing
+    {
+        get { return _lineSpacing; }
+        set
+        {
+            if (!Mathf.Approximately(_lineSpacing, value))
+            {
+                _lineSpacing = value;
                 InvalidateLayout();
             }
         }
@@ -296,6 +333,8 @@ public class BitmapText : BaseMeshEffect
             !Mathf.Approximately(_lastMonospaceWidth, _monospaceWidth) ||
             _lastMonospaceChars != _monospaceChars ||
             _lastBestFit != _bestFit ||
+            _lastWordWrap != _wordWrap ||
+            !Mathf.Approximately(_lastLineSpacing, _lineSpacing) ||
             _lastFont != _font ||
             !Mathf.Approximately(_lastRTWidth, rtWidth) ||
             !Mathf.Approximately(_lastRTHeight, rtHeight) ||
@@ -327,6 +366,8 @@ public class BitmapText : BaseMeshEffect
         _lastMonospaceWidth = _monospaceWidth;
         _lastMonospaceChars = _monospaceChars;
         _lastBestFit = _bestFit;
+        _lastWordWrap = _wordWrap;
+        _lastLineSpacing = _lineSpacing;
         _lastFont = _font;
         _lastRTWidth = rtWidth;
         _lastRTHeight = rtHeight;
@@ -339,6 +380,8 @@ public class BitmapText : BaseMeshEffect
     {
         string text = _text != null ? _text.text : "";
         _charXPositions.Clear();
+        _charYPositions.Clear();
+        _lineCount = 1;
         _effectiveScale = _scale;
 
         _monoAdvance = 0f;
@@ -358,6 +401,40 @@ public class BitmapText : BaseMeshEffect
             }
         }
 
+        if (_bestFit && rectWidth > 0f && _maxCharHeight > 0f)
+        {
+            float low = _minScale;
+            float high = _maxScale;
+
+            for (int iter = 0; iter < 20; iter++)
+            {
+                float mid = (low + high) * 0.5f;
+                bool fits = ComputeWidthAtScale(mid, text) <= rectWidth;
+
+                if (rectHeight > 0f && fits)
+                {
+                    if (_maxCharHeight * mid > rectHeight) fits = false;
+                }
+
+                if (fits) low = mid;
+                else high = mid;
+            }
+
+            _effectiveScale = low;
+        }
+
+        if (_wordWrap && rectWidth > 0f && ComputeWidthAtScale(_effectiveScale, text) > rectWidth)
+        {
+            LayoutWrapped(text, rectWidth, alignment);
+        }
+        else
+        {
+            LayoutSingle(text);
+        }
+    }
+
+    private void LayoutSingle(string text)
+    {
         float xPos = 0f;
         for (int i = 0; i < text.Length; i++)
         {
@@ -366,63 +443,118 @@ public class BitmapText : BaseMeshEffect
 
             float advance = _monospace && _monoCharSet.Contains(ch) && _monoAdvance > 0f ? _monoAdvance : cd.advance;
             _charXPositions.Add(xPos);
+            _charYPositions.Add(0f);
             xPos += advance * _effectiveScale + _letterSpacing;
         }
 
-        float lastSpacing = _charXPositions.Count > 0 ? _letterSpacing : 0f;
-        _totalWidth = xPos - lastSpacing;
+        _totalWidth = _charXPositions.Count > 0 ? xPos - _letterSpacing : 0f;
+        _lineCount = 1;
+    }
 
-        if (_bestFit && _totalWidth > 0f && _maxCharHeight > 0f)
+    private void LayoutWrapped(string text, float rectWidth, TextAnchor alignment)
+    {
+        if (rectWidth <= 0f)
         {
-            float low = _minScale;
-            float high = _maxScale;
+            LayoutSingle(text);
+            return;
+        }
 
-            bool hasWidth = rectWidth > 0f;
-            bool hasHeight = rectHeight > 0f;
+        var rows = new List<List<WrappedChar>>();
+        var currentRow = new List<WrappedChar>();
+        float rowWidth = 0f;
+        int rowCharCount = 0;
 
-            if (!hasWidth && !hasHeight)
-                return;
+        for (int i = 0; i < text.Length; i++)
+        {
+            char ch = text[i];
+            if (!_charCache.TryGetValue(ch, out CharData cd)) continue;
 
-            for (int iter = 0; iter < 20; iter++)
+            float advance = _monospace && _monoCharSet.Contains(ch) && _monoAdvance > 0f ? _monoAdvance : cd.advance;
+            float charW = advance * _effectiveScale;
+            float step = charW + (rowCharCount > 0 ? _letterSpacing : 0f);
+
+            if (rowCharCount > 0 && rowWidth + step > rectWidth)
             {
-                float mid = (low + high) * 0.5f;
-                bool fits = true;
-
-                if (hasWidth)
-                {
-                    float testWidth = ComputeWidthAtScale(mid, text);
-                    if (testWidth > rectWidth) fits = false;
-                }
-
-                if (hasHeight && fits)
-                {
-                    float testHeight = _maxCharHeight * mid;
-                    if (testHeight > rectHeight) fits = false;
-                }
-
-                if (fits)
-                    low = mid;
-                else
-                    high = mid;
+                rows.Add(currentRow);
+                currentRow = new List<WrappedChar>();
+                rowWidth = 0f;
+                rowCharCount = 0;
+                step = charW;
             }
 
-            _effectiveScale = low;
+            rowWidth += step;
+            currentRow.Add(new WrappedChar { textIndex = i, xOffset = rowWidth - charW });
+            rowCharCount++;
+        }
 
-            _charXPositions.Clear();
-            xPos = 0f;
-            for (int i = 0; i < text.Length; i++)
+        if (currentRow.Count > 0)
+            rows.Add(currentRow);
+
+        _lineCount = rows.Count;
+        float lineHeight = _maxCharHeight * _effectiveScale + _lineSpacing;
+        float totalYOffset = (rows.Count - 1) * lineHeight;
+        _totalWidth = 0f;
+
+        var xMap = new Dictionary<int, float>();
+        var yMap = new Dictionary<int, float>();
+
+        for (int r = 0; r < rows.Count; r++)
+        {
+            float rowW = 0f;
+            for (int c = 0; c < rows[r].Count; c++)
             {
-                char ch = text[i];
-                if (!_charCache.TryGetValue(ch, out CharData cd)) continue;
-
+                var wc = rows[r][c];
+                char ch = text[wc.textIndex];
                 float advance = _monospace && _monoCharSet.Contains(ch) && _monoAdvance > 0f
                     ? _monoAdvance
-                    : cd.advance;
-                _charXPositions.Add(xPos);
-                xPos += advance * _effectiveScale + _letterSpacing;
+                    : _charCache[ch].advance;
+                if (c > 0) rowW += _letterSpacing;
+                rowW += advance * _effectiveScale;
             }
 
-            _totalWidth = xPos - (_charXPositions.Count > 0 ? _letterSpacing : 0f);
+            if (rowW > _totalWidth) _totalWidth = rowW;
+
+            float rowStartX = GetRowStartX(rectWidth, rowW, alignment);
+            float yCenter = totalYOffset * 0.5f - r * lineHeight;
+
+            for (int c = 0; c < rows[r].Count; c++)
+            {
+                var wc = rows[r][c];
+                xMap[wc.textIndex] = rowStartX + wc.xOffset;
+                yMap[wc.textIndex] = yCenter;
+            }
+        }
+
+        for (int i = 0; i < text.Length; i++)
+        {
+            char ch = text[i];
+            if (!_charCache.ContainsKey(ch)) continue;
+
+            _charXPositions.Add(xMap.ContainsKey(i) ? xMap[i] : 0f);
+            _charYPositions.Add(yMap.ContainsKey(i) ? yMap[i] : 0f);
+        }
+    }
+
+    private struct WrappedChar
+    {
+        public int textIndex;
+        public float xOffset;
+    }
+
+    private float GetRowStartX(float rectWidth, float rowWidth, TextAnchor alignment)
+    {
+        switch (alignment)
+        {
+            case TextAnchor.UpperLeft:
+            case TextAnchor.MiddleLeft:
+            case TextAnchor.LowerLeft:
+                return 0f;
+            case TextAnchor.UpperRight:
+            case TextAnchor.MiddleRight:
+            case TextAnchor.LowerRight:
+                return rectWidth - rowWidth;
+            default:
+                return (rectWidth - rowWidth) * 0.5f;
         }
     }
 
@@ -462,8 +594,10 @@ public class BitmapText : BaseMeshEffect
         float rectHeight = rt != null ? rt.rect.height : 100f;
         Vector2 pivot = rt != null ? rt.pivot : new Vector2(0.5f, 0.5f);
 
-        float startX = GetStartX(rectWidth, _text.alignment, pivot.x);
-        float textYCenter = GetTextYCenter(rectHeight, _text.alignment, pivot.y);
+        float startX = _lineCount > 1 ? -rectWidth * pivot.x : GetStartX(rectWidth, _text.alignment, pivot.x);
+        float textYCenter = _lineCount > 1
+            ? GetMultiLineYCenter(rectHeight, _text.alignment, pivot.y)
+            : GetTextYCenter(rectHeight, _text.alignment, pivot.y);
 
         Color textColor = _text.color;
         int charLayoutIdx = 0;
@@ -494,8 +628,9 @@ public class BitmapText : BaseMeshEffect
             UIVertex vert = UIVertex.simpleVert;
             vert.color = textColor;
 
-            float yBottom = textYCenter - hh;
-            float yTop = textYCenter + hh;
+            float charY = _lineCount > 1 ? textYCenter + _charYPositions[charLayoutIdx] : textYCenter;
+            float yBottom = charY - hh;
+            float yTop = charY + hh;
 
             vert.position = new Vector3(xCenter - hw, yBottom, 0f);
             vert.uv0 = new Vector2(uvL, uvB);
@@ -518,6 +653,28 @@ public class BitmapText : BaseMeshEffect
 
             vertCount += 4;
             charLayoutIdx++;
+        }
+    }
+
+    private float GetMultiLineYCenter(float rectHeight, TextAnchor alignment, float pivotY)
+    {
+        float lineHeight = _maxCharHeight * _effectiveScale + _lineSpacing;
+        float totalHeight = _lineCount * lineHeight - _lineSpacing;
+        float bottomEdge = -rectHeight * pivotY;
+        float halfHeight = totalHeight * 0.5f;
+
+        switch (alignment)
+        {
+            case TextAnchor.UpperLeft:
+            case TextAnchor.UpperCenter:
+            case TextAnchor.UpperRight:
+                return bottomEdge + rectHeight - halfHeight;
+            case TextAnchor.LowerLeft:
+            case TextAnchor.LowerCenter:
+            case TextAnchor.LowerRight:
+                return bottomEdge + halfHeight;
+            default:
+                return bottomEdge + rectHeight * 0.5f;
         }
     }
 
